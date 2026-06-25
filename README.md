@@ -403,6 +403,43 @@ Ollama should respond at:
 http://localhost:11434
 ```
 
+## Reference Links
+
+These are useful links if someone asks where the tools and concepts come from.
+
+### Tesseract And OCR
+
+- [Tesseract official documentation](https://tesseract-ocr.github.io/)
+- [Tesseract GitHub repository](https://github.com/tesseract-ocr/tesseract)
+- [Tesseract tessdoc repository](https://github.com/tesseract-ocr/tessdoc)
+
+Tesseract is the OCR engine used in this demo. Its documentation explains how the command-line OCR tool works, how language data is used, and how page segmentation modes such as `--psm` affect recognition.
+
+### Ollama
+
+- [Ollama documentation](https://docs.ollama.com/)
+- [Ollama API introduction](https://docs.ollama.com/api/introduction)
+- [Ollama generate API](https://docs.ollama.com/api/generate)
+- [Ollama GitHub repository](https://github.com/ollama/ollama)
+
+Ollama is used here to run the AI model locally. The Python script calls Ollama through its local HTTP API at `http://localhost:11434`.
+
+### Gemma Model
+
+- [Google Gemma documentation](https://ai.google.dev/gemma/docs)
+- [Google DeepMind Gemma page](https://deepmind.google/models/gemma/)
+- [Gemma model overview](https://ai.google.dev/gemma/docs/core)
+
+Gemma is the local language model family used through Ollama in this demo. The model reads the OCR text and extracts structured fields such as names, organizations, and tax IDs.
+
+### Open Models And Model Hubs
+
+- [Hugging Face Models](https://huggingface.co/models)
+- [Hugging Face documentation](https://huggingface.co/docs)
+- [Hugging Face Transformers documentation](https://huggingface.co/docs/transformers/en/index)
+
+These links are useful for explaining the wider open-model ecosystem. Many language models can be downloaded or run locally, depending on their license, hardware requirements, and supported runtime.
+
 ## One-Sentence Explanation
 
 This demo converts a Greek PDF into readable text using Tesseract OCR, then uses a local Ollama AI model to extract names, organizations, and tax IDs into structured JSON.
