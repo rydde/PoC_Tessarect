@@ -1,9 +1,11 @@
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from itertools import zip_longest
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -11,24 +13,19 @@ INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"
 LOCAL_TESSDATA_DIR = BASE_DIR / "tessdata"
 
-# Use "ell+eng" for Greek documents that may contain English words, email, URLs,
-# or Latin labels such as "Tax ID".
-LANGUAGE = "ell+eng"
+# Use a mixed-language pass plus a Greek-only pass. The mixed pass helps with
+# email, URLs, and Latin labels; the Greek-only pass helps avoid Latin letters
+# being hallucinated into Greek words.
+PRIMARY_LANGUAGE = "ell+eng"
+FALLBACK_LANGUAGE = "ell"
 PDF_RENDER_SCALE = 4
 TESSERACT_PSM = "11"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 PDF_EXTENSION = ".pdf"
 
-OCR_TEXT_FIXES = {
-    "ΜΠΕΚΑΣ ΕΜΠΟΡΙΚΗΙ.Κ.Ε.": "ΜΠΕΚΑΣ ΕΜΠΟΡΙΚΗ Ι.Κ.Ε.",
-    "Ανεξάρτητη Αρχή Δημοσίων Eoddwv": "Ανεξάρτητη Αρχή Δημοσίων Εσόδων",
-    "Οικονοµικών": "Οικονομικών",
-    "οικονοµικών": "οικονομικών",
-    "επίσηµα": "επίσημα",
-    "συστήµατά": "συστήματά",
-    "Παραμένουµε": "Παραμένουμε",
-}
+GREEK_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 
 
 def find_tesseract() -> str:
@@ -58,18 +55,19 @@ def tesseract_env() -> dict[str, str]:
 
 
 def normalize_ocr_text(text: str) -> str:
-    for wrong, correct in OCR_TEXT_FIXES.items():
-        text = text.replace(wrong, correct)
+    text = text.replace("µ", "μ")
+    text = re.sub(r"(\S)([ΙI]\.\s*Κ\.\s*Ε\.)", r"\1 \2", text)
+    text = re.sub(r"\s+([.,:;])", r"\1", text)
     return text
 
 
-def ocr_image(tesseract: str, image_path: Path) -> str:
+def run_tesseract(tesseract: str, image_path: Path, language: str) -> str:
     command = [
         tesseract,
         str(image_path),
         "stdout",
         "-l",
-        LANGUAGE,
+        language,
         "--oem",
         "1",
         "--psm",
@@ -99,7 +97,50 @@ def ocr_image(tesseract: str, image_path: Path) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip())
 
-    return normalize_ocr_text(result.stdout.strip())
+    return result.stdout.strip()
+
+
+def looks_like_mixed_greek_error(line: str) -> bool:
+    if "@" in line or "&" in line or "://" in line or "tax id" in line.lower():
+        return False
+
+    greek_count = len(GREEK_RE.findall(line))
+    latin_count = len(LATIN_RE.findall(line))
+    return greek_count >= 5 and latin_count >= 4
+
+
+def choose_best_line(primary_line: str, fallback_line: str) -> str:
+    primary = primary_line.strip()
+    fallback = fallback_line.strip()
+
+    if not primary:
+        return fallback
+    if not fallback:
+        return primary
+
+    primary_latin = len(LATIN_RE.findall(primary))
+    fallback_latin = len(LATIN_RE.findall(fallback))
+
+    if looks_like_mixed_greek_error(primary) and fallback_latin < primary_latin:
+        return fallback
+
+    return primary
+
+
+def merge_ocr_text(primary_text: str, fallback_text: str) -> str:
+    primary_lines = primary_text.splitlines()
+    fallback_lines = fallback_text.splitlines()
+    merged_lines = [
+        choose_best_line(primary_line or "", fallback_line or "")
+        for primary_line, fallback_line in zip_longest(primary_lines, fallback_lines)
+    ]
+    return normalize_ocr_text("\n".join(merged_lines).strip())
+
+
+def ocr_image(tesseract: str, image_path: Path) -> str:
+    primary_text = run_tesseract(tesseract, image_path, PRIMARY_LANGUAGE)
+    fallback_text = run_tesseract(tesseract, image_path, FALLBACK_LANGUAGE)
+    return merge_ocr_text(primary_text, fallback_text)
 
 
 def ocr_pdf(tesseract: str, pdf_path: Path) -> str:

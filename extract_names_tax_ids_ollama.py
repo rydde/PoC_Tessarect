@@ -7,19 +7,28 @@ import urllib.request
 
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_TEXT = BASE_DIR / "output" / "Greek_Doc.txt"
-OUTPUT_JSON = BASE_DIR / "output" / "Greek_Doc_entities.json"
+OUTPUT_DIR = BASE_DIR / "output"
 
 # Use one of the models installed in your local Docker Ollama instance.
 OLLAMA_MODEL = "gemma4:latest"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-TEXT_FIXES = {
-    "ΜΠΕΚΑΣ ΕΜΠΟΡΙΚΗΙ.Κ.Ε.": "ΜΠΕΚΑΣ ΕΜΠΟΡΙΚΗ Ι.Κ.Ε.",
-    "Ανεξάρτητη Αρχή Δημοσίων Eoddwv": "Ανεξάρτητη Αρχή Δημοσίων Εσόδων",
-    "Οικονοµικών": "Οικονομικών",
-    "οικονοµικών": "οικονομικών",
-}
+TAX_ID_RE = re.compile(
+    r"(?:Α\.?\s*Φ\.?\s*Μ\.?|AFM|A\.?\s*F\.?\s*M\.?|Tax\s*ID)\D{0,20}(\d{7,12})",
+    flags=re.IGNORECASE,
+)
+PERSON_LABEL_RE = re.compile(
+    r"^(?:[οo©]\s*)?(?:Ονοματεπώνυμο|Όνομα|Name|Full\s+Name)\s*:\s*(.+)$",
+    flags=re.IGNORECASE,
+)
+ROLE_LABEL_RE = re.compile(
+    r"^(?:[οo©]\s*)?(?:Ιδιότητα|Ρόλος|Role|Title)\s*:\s*(.+)$",
+    flags=re.IGNORECASE,
+)
+ORG_LABEL_RE = re.compile(r"^(?:Προς|To|Recipient)\s*:\s*(.+)$", flags=re.IGNORECASE)
+ACRONYM_ORG_RE = re.compile(
+    r"\b([A-ZΑ-ΩΆΈΉΊΌΎΏ]{2,})\s*\(([^)]{8,})\)"
+)
 
 
 def call_ollama(prompt: str) -> str:
@@ -62,16 +71,29 @@ def call_ollama(prompt: str) -> str:
     return data["response"]
 
 
+def normalize_text(text: str) -> str:
+    text = text.replace("µ", "μ")
+    text = re.sub(r"(\S)([ΙI]\.\s*Κ\.\s*Ε\.)", r"\1 \2", text)
+    text = re.sub(r"\s+([.,:;])", r"\1", text)
+    return text
+
+
+def clean_name(value: str) -> str:
+    value = normalize_text(value.strip())
+    value = re.sub(r"^[οo©]\s+", "", value)
+    return value.strip(" -")
+
+
 def build_prompt(text: str) -> str:
     return f"""
 Extract all person names, organization names, and tax IDs from the OCR text below.
 
-The text is Greek OCR output, so tolerate OCR mistakes.
-Greek tax IDs may be labeled as AFM, Tax ID, A.F.M., or Greek equivalents.
-Include organizations after labels like "Προς:" as recipient organizations.
-Normalize obvious OCR spelling artifacts in extracted names, but keep evidence from the source text.
+The text is OCR output from a Greek business document. It may contain OCR mistakes.
+Tax IDs may be labeled as AFM, Tax ID, A.F.M., or Greek equivalents.
+Include recipient organizations that appear after labels like "Προς:".
+Return only valid JSON. Do not add commentary.
 
-Return only valid JSON using this schema:
+Use this exact schema:
 {{
   "people": [
     {{
@@ -104,57 +126,115 @@ OCR text:
 """.strip()
 
 
-def normalize_text(text: str) -> str:
-    for wrong, correct in TEXT_FIXES.items():
-        text = text.replace(wrong, correct)
-    return text
-
-
-def normalize_value(value):
-    if isinstance(value, str):
-        return normalize_text(value)
-    if isinstance(value, list):
-        return [normalize_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: normalize_value(item) for key, item in value.items()}
+def ensure_list(extracted: dict, key: str) -> list:
+    value = extracted.get(key)
+    if not isinstance(value, list):
+        value = []
+        extracted[key] = value
     return value
 
 
-def add_recipient_organizations(extracted: dict, text: str) -> dict:
-    organizations = extracted.setdefault("organizations", [])
-    existing_names = {
-        organization.get("name")
-        for organization in organizations
-        if isinstance(organization, dict)
-    }
+def add_unique_item(items: list, item: dict, unique_key: str) -> None:
+    new_value = item.get(unique_key)
+    if not new_value:
+        return
 
-    for match in re.finditer(r"^Προς:\s*(.+)$", text, flags=re.MULTILINE):
-        name = match.group(1).strip()
-        if name and name not in existing_names:
-            organizations.append(
+    for existing in items:
+        if isinstance(existing, dict) and existing.get(unique_key) == new_value:
+            for key, value in item.items():
+                if existing.get(key) in (None, "") and value not in (None, ""):
+                    existing[key] = value
+            return
+
+    items.append(item)
+
+
+def apply_rule_based_safeguards(extracted: dict, text: str) -> dict:
+    people = ensure_list(extracted, "people")
+    organizations = ensure_list(extracted, "organizations")
+    tax_ids = ensure_list(extracted, "tax_ids")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    last_person = None
+    for index, line in enumerate(lines):
+        person_match = PERSON_LABEL_RE.match(line)
+        if person_match:
+            name = clean_name(person_match.group(1))
+            last_person = name
+            role = None
+            evidence_lines = [line]
+
+            if index + 1 < len(lines):
+                role_match = ROLE_LABEL_RE.match(lines[index + 1])
+                if role_match:
+                    role = clean_name(role_match.group(1))
+                    evidence_lines.append(lines[index + 1])
+
+            add_unique_item(
+                people,
                 {
                     "name": name,
                     "tax_id": None,
-                    "evidence": match.group(0).strip(),
-                }
+                    "role_or_title": role,
+                    "evidence": "\n".join(evidence_lines),
+                },
+                "name",
             )
-            existing_names.add(name)
+
+        org_match = ORG_LABEL_RE.match(line)
+        if org_match:
+            name = clean_name(org_match.group(1))
+            add_unique_item(
+                organizations,
+                {
+                    "name": name,
+                    "tax_id": None,
+                    "evidence": line,
+                },
+                "name",
+            )
+
+        for acronym, expansion in ACRONYM_ORG_RE.findall(line):
+            add_unique_item(
+                organizations,
+                {
+                    "name": f"{acronym} ({clean_name(expansion)})",
+                    "tax_id": None,
+                    "evidence": line,
+                },
+                "name",
+            )
+
+        tax_match = TAX_ID_RE.search(line)
+        if tax_match:
+            tax_id = tax_match.group(1)
+            add_unique_item(
+                tax_ids,
+                {
+                    "tax_id": tax_id,
+                    "associated_name": last_person,
+                    "evidence": line,
+                },
+                "tax_id",
+            )
+            if last_person:
+                add_unique_item(
+                    people,
+                    {
+                        "name": last_person,
+                        "tax_id": tax_id,
+                        "role_or_title": None,
+                        "evidence": line,
+                    },
+                    "name",
+                )
 
     return extracted
 
 
-def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
-    if not INPUT_TEXT.exists():
-        print(f"Input text file not found: {INPUT_TEXT}")
-        print("Run ocr_local.py first.")
-        sys.exit(1)
-
-    text = normalize_text(INPUT_TEXT.read_text(encoding="utf-8-sig"))
-    prompt = build_prompt(text)
-    response_text = call_ollama(prompt)
+def extract_entities(input_text: Path) -> dict:
+    text = normalize_text(input_text.read_text(encoding="utf-8-sig"))
+    response_text = call_ollama(build_prompt(text))
 
     try:
         extracted = json.loads(response_text)
@@ -163,16 +243,42 @@ def main() -> None:
         print(response_text)
         sys.exit(1)
 
-    extracted = normalize_value(extracted)
-    extracted = add_recipient_organizations(extracted, text)
+    return apply_rule_based_safeguards(extracted, text)
 
-    OUTPUT_JSON.write_text(
-        json.dumps(extracted, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8-sig",
+
+def input_files_from_args() -> list[Path]:
+    if len(sys.argv) > 1:
+        return [Path(arg).resolve() for arg in sys.argv[1:]]
+
+    return sorted(
+        path for path in OUTPUT_DIR.glob("*.txt") if not path.name.endswith("_entities.txt")
     )
 
-    print(f"Saved extracted entities to: {OUTPUT_JSON}")
-    print(json.dumps(extracted, indent=2, ensure_ascii=False))
+
+def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    input_files = input_files_from_args()
+    if not input_files:
+        print(f"No OCR text files found in: {OUTPUT_DIR}")
+        print("Run ocr_local.py first.")
+        sys.exit(1)
+
+    for input_text in input_files:
+        if not input_text.exists():
+            print(f"Input text file not found: {input_text}")
+            continue
+
+        output_json = input_text.with_name(f"{input_text.stem}_entities.json")
+        extracted = extract_entities(input_text)
+        output_json.write_text(
+            json.dumps(extracted, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8-sig",
+        )
+
+        print(f"Saved extracted entities to: {output_json}")
+        print(json.dumps(extracted, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -136,13 +136,14 @@ ell.traineddata  = Greek language OCR data
 eng.traineddata  = English language OCR data
 ```
 
-We use both:
+The OCR script uses two passes:
 
 ```python
-LANGUAGE = "ell+eng"
+PRIMARY_LANGUAGE = "ell+eng"
+FALLBACK_LANGUAGE = "ell"
 ```
 
-Why both? The document is mainly Greek, but it also contains mixed content such as:
+Why two passes? The document is mainly Greek, but it can also contain mixed content such as:
 
 ```text
 Email: info@bekas-logistics.gr
@@ -150,7 +151,7 @@ Tax ID
 Logistics
 ```
 
-Using Greek plus English helps Tesseract read mixed-language documents more accurately.
+The `ell+eng` pass helps with mixed Greek and English content. The Greek-only `ell` pass helps when English recognition accidentally turns Greek words into Latin-looking text. The script compares the two OCR results line by line and keeps the cleaner line.
 
 ## What Is Ollama?
 
@@ -215,8 +216,8 @@ The prompt is important because the AI model is flexible. If we ask a vague ques
 3. Tesseract OCR
    Responsibility: convert image text into real text
 
-4. OCR cleanup
-   Responsibility: fix known OCR issues such as Greek/English character confusion
+4. OCR quality pass
+   Responsibility: compare mixed-language OCR with Greek-only OCR and keep cleaner lines
 
 5. Ollama prompt
    Responsibility: ask the AI model to extract specific fields
@@ -266,7 +267,8 @@ What it does:
 Important settings:
 
 ```python
-LANGUAGE = "ell+eng"
+PRIMARY_LANGUAGE = "ell+eng"
+FALLBACK_LANGUAGE = "ell"
 PDF_RENDER_SCALE = 4
 TESSERACT_PSM = "11"
 ```
@@ -274,7 +276,8 @@ TESSERACT_PSM = "11"
 Meaning:
 
 ```text
-ell+eng = read Greek and English
+ell+eng = read Greek plus English mixed content
+ell     = Greek-only fallback pass
 scale 4 = render the PDF at higher quality before OCR
 psm 11  = let Tesseract find sparse text across the full page
 ```
@@ -329,28 +332,18 @@ The final JSON includes:
 }
 ```
 
-## Why OCR Cleanup Is Needed
+## Why OCR Quality Checks Are Needed
 
 OCR is not always perfect, especially when a document mixes languages.
 
-For example, Greek letters can sometimes look similar to English letters. Tesseract may incorrectly read:
+For example, Greek letters can sometimes look similar to English letters. A mixed-language OCR pass may read part of a Greek word as Latin characters.
 
-```text
-Ανεξάρτητη Αρχή Δημοσίων Eoddwv
-```
-
-when the correct text is:
-
-```text
-Ανεξάρτητη Αρχή Δημοσίων Εσόδων
-```
-
-So the Python code includes a small cleanup step for known OCR mistakes in this demo document.
+Instead of hardcoding document-specific corrections, this project runs a second Greek-only OCR pass and uses general rules to prefer the cleaner line when mixed-language OCR introduces suspicious Latin letters into Greek text.
 
 This is normal in OCR projects. Production systems usually combine:
 
 ```text
-OCR settings + language data + cleanup rules + AI extraction
+OCR settings + language data + validation rules + AI extraction
 ```
 
 ## Demo Talking Points
