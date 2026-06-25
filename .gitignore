@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Tesseract language packs are local runtime dependencies.
+tessdata/
+
+# Local scratch files.
+tmp/
